@@ -3,7 +3,7 @@ import puppeteer from 'puppeteer';
 const DFPI_URL =
     'https://dfpi.ca.gov/regulated-industries/regulated-entities-list/';
 
-export async function searchDFPI(companyName) {
+export async function searchDFPI(companyName) { 
 
     const browser =
         await puppeteer.launch({
