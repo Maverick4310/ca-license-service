@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+
 import licenseRoutes from './routes/licenses.js';
 
 dotenv.config();
@@ -15,5 +16,5 @@ app.use('/api/licenses', licenseRoutes);
 const port = process.env.PORT || 3000;
 
 app.listen(port, () => {
-    console.log(`Listening on ${port}`);
+    console.log(`Server running on ${port}`);
 });
