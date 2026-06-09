@@ -1,19 +1,20 @@
 import express from 'express';
+import { requireAuth } from '../middleware/auth.js';
 import { searchDFPI } from '../services/dfpiService.js';
 import { scoreMatches } from '../services/scoringService.js';
 
 const router = express.Router();
 
-router.post('/search', async (req, res) => {
-
+router.post('/search', requireAuth, async (req, res) => {
     try {
+        const { name, address, website, phone } = req.body;
 
-        const {
-            name,
-            address,
-            website,
-            phone
-        } = req.body;
+        if (!name) {
+            return res.status(400).json({
+                success: false,
+                message: 'Name is required.'
+            });
+        }
 
         const rawResults = await searchDFPI(name);
 
@@ -26,9 +27,7 @@ router.post('/search', async (req, res) => {
         });
 
         res.json(scored.slice(0, 10));
-
     } catch (e) {
-
         console.error(e);
 
         res.status(500).json({
