@@ -1,114 +1,51 @@
-import puppeteer from 'puppeteer';
+import axios from 'axios';
 
-const DFPI_URL =
-    'https://dfpi.ca.gov/regulated-industries/regulated-entities-list/';
+const DFPI_SEARCH_URL = 'https://dfpi.ca.gov/';
 
 export async function searchDFPI(companyName) {
     if (!companyName) {
         return [];
     }
 
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage'
-        ]
+    const searchUrl =
+        `${DFPI_SEARCH_URL}?s=${encodeURIComponent(companyName)}`;
+
+    const response = await axios.get(searchUrl, {
+        timeout: 15000,
+        headers: {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'text/html'
+        }
     });
 
-    try {
-        const page = await browser.newPage();
+    const html = response.data || '';
 
-        await page.goto(DFPI_URL, {
-            waitUntil: 'networkidle2',
-            timeout: 60000
-        });
+    const blocks = extractSearchBlocks(html);
 
-        const selector = await findSearchSelector(page);
-
-        if (!selector) {
-            throw new Error('Search field not found.');
-        }
-
-        await page.$eval(
-            selector,
-            (el, value) => {
-                el.value = value;
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-            },
-            `"${companyName}"`
-        );
-
-        await page.keyboard.press('Enter');
-
-        await page.waitForNavigation({
-            waitUntil: 'networkidle2',
-            timeout: 30000
-        }).catch(() => null);
-
-        await page.waitForTimeout(3000);
-
-        const results = await page.evaluate(() => {
-            const rows = [];
-
-            document
-                .querySelectorAll('article, tr, li, .entry-content, .wp-block-post')
-                .forEach(node => {
-                    const text = node.innerText?.trim();
-
-                    if (text && text.length > 30) {
-                        rows.push(text);
-                    }
-                });
-
-            return rows;
-        });
-
-        return results
-            .map(parseDfpiTextBlock)
-            .filter(row => row.entityName)
-            .slice(0, 25);
-
-    } finally {
-        await browser.close();
-    }
+    return blocks
+        .map(parseDfpiBlock)
+        .filter(row => row.entityName)
+        .slice(0, 25);
 }
 
-async function findSearchSelector(page) {
-    const selectors = [
-        'input[type="search"]',
-        'input[name="s"]',
-        'input.search-field',
-        '.search-field',
-        'input[placeholder*="Search"]',
-        'input[aria-label*="Search"]'
-    ];
+function extractSearchBlocks(html) {
+    const blocks = [];
 
-    for (const selector of selectors) {
-        const count = await page.$$eval(selector, nodes => {
-            return nodes.filter(node => {
-                const style = window.getComputedStyle(node);
-                return (
-                    node instanceof HTMLInputElement &&
-                    style &&
-                    style.display !== 'none' &&
-                    style.visibility !== 'hidden' &&
-                    !node.disabled
-                );
-            }).length;
-        }).catch(() => 0);
+    const articleRegex = /<article[\s\S]*?<\/article>/gi;
+    const matches = html.match(articleRegex) || [];
 
-        if (count > 0) {
-            return selector;
+    for (const match of matches) {
+        const text = stripHtml(match);
+
+        if (text.length > 30) {
+            blocks.push(text);
         }
     }
 
-    return null;
+    return blocks;
 }
 
-function parseDfpiTextBlock(text) {
+function parseDfpiBlock(text) {
     const lines = text
         .split('\n')
         .map(x => x.trim())
@@ -131,10 +68,24 @@ function parseDfpiTextBlock(text) {
         licenseNumber: licenseMatch ? licenseMatch[0] : '',
         licenseType: text.toLowerCase().includes('california financing')
             ? 'California Financing Law'
-            : 'DFPI Regulated Entity',
+            : 'DFPI Search Result',
         licenseStatus: statusMatch ? statusMatch[0] : '',
         address: lines.slice(1, 4).join(', '),
         source: 'DFPI',
         rawJson: JSON.stringify({ text })
     };
+}
+
+function stripHtml(html) {
+    return html
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]*>/g, '\n')
+        .replace(/&amp;/g, '&')
+        .replace(/&#8211;/g, '-')
+        .replace(/&#8217;/g, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\n+/g, '\n')
+        .trim();
 }
