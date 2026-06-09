@@ -1,4 +1,4 @@
-import { chromium } from 'playwright';
+import { chromium } from 'playwright-chromium';
 
 const DFPI_URL = 'https://dfpi.ca.gov/regulated-industries/regulated-entities-list/'; 
 
