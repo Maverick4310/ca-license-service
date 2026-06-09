@@ -1,6 +1,6 @@
 import { chromium } from 'playwright';
 
-const DFPI_URL = 'https://dfpi.ca.gov/regulated-industries/regulated-entities-list/';
+const DFPI_URL = 'https://dfpi.ca.gov/regulated-industries/regulated-entities-list/'; 
 
 export async function searchDFPI(companyName) {
     if (!companyName) {
