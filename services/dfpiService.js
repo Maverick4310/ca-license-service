@@ -2,7 +2,7 @@ import axios from 'axios';
 
 const DFPI_SEARCH_URL = 'https://dfpi.ca.gov/';
 
-export async function searchDFPI(companyName) {
+export async function searchDFPI(companyName) { 
     if (!companyName) {
         return [];
     }
