@@ -7,9 +7,7 @@ export async function searchDFPI(companyName) {
         throw new Error('SERPAPI_KEY is not configured.');
     }
 
-    const query =
-        `site:dfpi.ca.gov/regulated-industries/regulated-entities-list ` +
-        `"${companyName}" "License Number"`;
+    const query = `site:dfpi.ca.gov "${companyName}"`;
 
     const url =
         `https://serpapi.com/search.json?engine=google` +
@@ -29,6 +27,7 @@ export async function searchDFPI(companyName) {
     return (data.organic_results || [])
         .map(result => {
             const text = `${result.title || ''} ${result.snippet || ''}`;
+            const source = result.link || 'SerpAPI / DFPI';
 
             return {
                 entityName: extractEntityName(result, companyName),
@@ -36,12 +35,12 @@ export async function searchDFPI(companyName) {
                 licenseType: extractLicenseType(text),
                 licenseStatus: extractStatus(text),
                 address: extractAddress(text),
-                source: result.link || 'SerpAPI / DFPI',
+                source,
                 rawJson: JSON.stringify(result)
             };
         })
         .filter(row => {
-            return row.entityName || row.licenseNumber;
+            return row.entityName || row.licenseNumber || row.source;
         })
         .slice(0, 25);
 }
@@ -51,14 +50,20 @@ function extractEntityName(result, fallbackName) {
 
     if (
         title &&
-        !title.toLowerCase().includes('regulated entities list') &&
-        !title.toLowerCase().includes('dfpi')
+        !title.toLowerCase().includes('dfpi') &&
+        !title.toLowerCase().includes('news') &&
+        !title.toLowerCase().includes('consumers') &&
+        !title.toLowerCase().includes('site map') &&
+        !title.toLowerCase().includes('press releases')
     ) {
         return title;
     }
 
     const snippet = result.snippet || '';
-    const legalMatch = snippet.match(/Legal Name Organization:\s*([^\.]+?)(?=Organization DBA:|Originally Licensed On:|License Type:|Address1:|$)/i);
+
+    const legalMatch =
+        snippet.match(/Legal Name Organization:\s*([^\.]+?)(?=Organization DBA:|Originally Licensed On:|License Type:|Address1:|$)/i) ||
+        snippet.match(/Party\.\s*([^\.]+?)(?=Documents|Date|$)/i);
 
     if (legalMatch) {
         return legalMatch[1].trim();
@@ -71,19 +76,26 @@ function cleanTitle(title) {
     return title
         .replace(' - DFPI - CA.gov', '')
         .replace(' - DFPI', '')
+        .replace(' - CA.gov', '')
         .trim();
 }
 
 function extractLicenseNumber(text) {
     const match =
         text.match(/License Number:\s*([A-Z0-9-]+)/i) ||
+        text.match(/License or Case Number\s*CFL\s*#?\s*([A-Z0-9-]+)/i) ||
+        text.match(/CFL\s*#?\s*(60DBO[-\s]?\d+)/i) ||
         text.match(/60DBO[-\s]?\d+/i) ||
         text.match(/603[A-Z0-9]+/i);
 
-    if (!match) return '';
+    if (!match) {
+        return '';
+    }
 
     return (match[1] || match[0])
         .replace(/^License Number:\s*/i, '')
+        .replace(/^License or Case Number\s*/i, '')
+        .replace(/^CFL\s*#?\s*/i, '')
         .trim();
 }
 
@@ -99,6 +111,7 @@ function extractLicenseType(text) {
     if (
         lower.includes('california finance lender') ||
         lower.includes('california financing law') ||
+        lower.includes('finance lender and broker') ||
         lower.includes('cfl')
     ) {
         return 'California Finance Lender and Broker';
