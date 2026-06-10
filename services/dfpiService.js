@@ -61,7 +61,27 @@ export async function searchDFPI(companyName, options = {}) {
 
     const url = `${endpoint}?${params.toString()}`;
 
-    const headers = { Accept: 'application/json' };
+    // SearchStax Site Search typically validates the browser Origin/Referer
+    // rather than (or in addition to) a token. A bare server-side request gets
+    // a 403, which is the usual reason a "direct callout doesn't work". Sending
+    // the same Origin/Referer/User-Agent the DFPI page uses makes the request
+    // look legitimate. CORS is browser-enforced only, so a server may set these.
+    const headers = {
+        Accept: 'application/json',
+        Origin:
+            options.origin ||
+            process.env.DFPI_SEARCH_ORIGIN ||
+            'https://dfpi.ca.gov',
+        Referer:
+            options.referer ||
+            process.env.DFPI_SEARCH_REFERER ||
+            'https://dfpi.ca.gov/',
+        'User-Agent':
+            options.userAgent ||
+            process.env.DFPI_SEARCH_UA ||
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+            '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    };
     if (token) {
         headers.Authorization = `Token ${token}`;
     }
@@ -74,8 +94,10 @@ export async function searchDFPI(companyName, options = {}) {
     if (!response.ok) {
         const hint =
             response.status === 401 || response.status === 403
-                ? ' (check DFPI_SEARCH_TOKEN -- the read-only token from the ' +
-                  'Authorization header)'
+                ? ' (auth/origin rejected -- if the request carries an ' +
+                  'Authorization header in DevTools set DFPI_SEARCH_TOKEN; ' +
+                  'otherwise the endpoint is gating on Origin/Referer, which ' +
+                  'this client already sends)'
                 : '';
         throw new Error(
             `DFPI /emselect failed with status ${response.status}${hint}`
