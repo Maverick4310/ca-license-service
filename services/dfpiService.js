@@ -3,96 +3,129 @@ export async function searchDFPI(companyName) {
         return [];
     }
 
+    if (!process.env.SERPAPI_KEY) {
+        throw new Error('SERPAPI_KEY is not configured.');
+    }
+
+    const query =
+        `site:dfpi.ca.gov/regulated-industries/regulated-entities-list ` +
+        `"${companyName}" "License Number"`;
+
     const url =
-        'https://dfpi.ca.gov/regulated-industries/regulated-entities-list/' +
-        `?searchStudioQuery=${encodeURIComponent(companyName)}` +
-        '&isGrid=false' +
-        '&facets=fq%3Dss_content_type_s%3A%22Regulated%2520Entity%22' +
-        '&orderBy=' +
-        '&start=0' +
-        '&model=DFPI';
+        `https://serpapi.com/search.json?engine=google` +
+        `&q=${encodeURIComponent(query)}` +
+        `&api_key=${process.env.SERPAPI_KEY}`;
 
     const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'text/html'
-        },
         signal: AbortSignal.timeout(15000)
     });
 
     if (!response.ok) {
-        throw new Error(`DFPI regulated entity search failed with status ${response.status}`);
+        throw new Error(`SerpAPI failed with status ${response.status}`);
     }
 
-    const html = await response.text();
+    const data = await response.json();
 
-    return parseRegulatedEntityResults(html)
-        .filter(row => row.entityName)
+    return (data.organic_results || [])
+        .map(result => {
+            const text = `${result.title || ''} ${result.snippet || ''}`;
+
+            return {
+                entityName: extractEntityName(result, companyName),
+                licenseNumber: extractLicenseNumber(text),
+                licenseType: extractLicenseType(text),
+                licenseStatus: extractStatus(text),
+                address: extractAddress(text),
+                source: result.link || 'SerpAPI / DFPI',
+                rawJson: JSON.stringify(result)
+            };
+        })
+        .filter(row => {
+            return row.entityName || row.licenseNumber;
+        })
         .slice(0, 25);
 }
 
-function parseRegulatedEntityResults(html) {
-    const text = stripHtml(html);
+function extractEntityName(result, fallbackName) {
+    const title = cleanTitle(result.title || '');
 
-    const chunks = text
-        .split('REGULATED ENTITY')
-        .map(x => x.trim())
-        .filter(x => x.includes('License Number:'));
-
-    return chunks.map(chunk => {
-        const entityName = extractEntityName(chunk);
-        const licenseNumber = extractValue(chunk, /License Number:\s*([^\s]+)/i);
-        const licenseStatus = extractValue(chunk, /Status:\s*([A-Za-z]+)/i);
-        const effectiveDate = extractValue(chunk, /Effective Status Date:\s*([0-9/]+)/i);
-        const licenseType = extractValue(chunk, /License Type:\s*([^A]+?)(?=Address1:|$)/i);
-        const address = extractAddress(chunk);
-
-        return {
-            entityName,
-            licenseNumber,
-            licenseType: licenseType || 'California Finance Lender and Broker',
-            licenseStatus,
-            address,
-            source: 'DFPI Regulated Entities List',
-            rawJson: JSON.stringify({
-                entityName,
-                licenseNumber,
-                licenseStatus,
-                effectiveDate,
-                licenseType,
-                address,
-                rawText: chunk
-            })
-        };
-    });
-}
-
-function extractEntityName(chunk) {
-    const lines = chunk
-        .split('\n')
-        .map(x => x.trim())
-        .filter(Boolean);
-
-    for (const line of lines) {
-        if (
-            !line.includes(':') &&
-            !line.toLowerCase().includes('license') &&
-            line.length > 2
-        ) {
-            return line.replace(/\.$/, '.');
-        }
+    if (
+        title &&
+        !title.toLowerCase().includes('regulated entities list') &&
+        !title.toLowerCase().includes('dfpi')
+    ) {
+        return title;
     }
 
-    return '';
+    const snippet = result.snippet || '';
+    const legalMatch = snippet.match(/Legal Name Organization:\s*([^\.]+?)(?=Organization DBA:|Originally Licensed On:|License Type:|Address1:|$)/i);
+
+    if (legalMatch) {
+        return legalMatch[1].trim();
+    }
+
+    return fallbackName;
 }
 
-function extractAddress(chunk) {
-    const address1 = extractValue(chunk, /Address1:\s*([^A]+?)(?=Address2:|City:|State:|Zip:|Registration Type:|$)/i);
-    const address2 = extractValue(chunk, /Address2:\s*([^C]+?)(?=City:|State:|Zip:|Registration Type:|$)/i);
-    const city = extractValue(chunk, /City:\s*([^S]+?)(?=State:|Zip:|Registration Type:|$)/i);
-    const state = extractValue(chunk, /State:\s*([^Z]+?)(?=Zip:|Registration Type:|$)/i);
-    const zip = extractValue(chunk, /Zip:\s*([0-9\-]+)/i);
+function cleanTitle(title) {
+    return title
+        .replace(' - DFPI - CA.gov', '')
+        .replace(' - DFPI', '')
+        .trim();
+}
+
+function extractLicenseNumber(text) {
+    const match =
+        text.match(/License Number:\s*([A-Z0-9-]+)/i) ||
+        text.match(/60DBO[-\s]?\d+/i) ||
+        text.match(/603[A-Z0-9]+/i);
+
+    if (!match) return '';
+
+    return (match[1] || match[0])
+        .replace(/^License Number:\s*/i, '')
+        .trim();
+}
+
+function extractLicenseType(text) {
+    const match = text.match(/License Type:\s*([^\.]+?)(?=Address1:|Address2:|City:|State:|Zip:|$)/i);
+
+    if (match) {
+        return match[1].trim();
+    }
+
+    const lower = text.toLowerCase();
+
+    if (
+        lower.includes('california finance lender') ||
+        lower.includes('california financing law') ||
+        lower.includes('cfl')
+    ) {
+        return 'California Finance Lender and Broker';
+    }
+
+    return 'DFPI Search Result';
+}
+
+function extractStatus(text) {
+    const match =
+        text.match(/Status:\s*([A-Za-z]+)/i) ||
+        text.match(/\bActive\b/i) ||
+        text.match(/\bInactive\b/i) ||
+        text.match(/\bRevoked\b/i) ||
+        text.match(/\bSurrendered\b/i) ||
+        text.match(/\bSuspended\b/i) ||
+        text.match(/\bExpired\b/i);
+
+    return match ? (match[1] || match[0]).trim() : '';
+}
+
+function extractAddress(text) {
+    const address1 = extractValue(text, /Address1:\s*([^\.]+?)(?=Address2:|City:|State:|Zip:|$)/i);
+    const address2 = extractValue(text, /Address2:\s*([^\.]+?)(?=City:|State:|Zip:|$)/i);
+    const city = extractValue(text, /City:\s*([^\.]+?)(?=State:|Zip:|$)/i);
+    const state = extractValue(text, /State:\s*([^\.]+?)(?=Zip:|$)/i);
+    const zip = extractValue(text, /Zip:\s*([0-9\-]+)/i);
 
     return [address1, address2, city, state, zip]
         .filter(Boolean)
@@ -102,18 +135,4 @@ function extractAddress(chunk) {
 function extractValue(text, regex) {
     const match = text.match(regex);
     return match ? match[1].trim() : '';
-}
-
-function stripHtml(html) {
-    return html
-        .replace(/<script[\s\S]*?<\/script>/gi, '')
-        .replace(/<style[\s\S]*?<\/style>/gi, '')
-        .replace(/<[^>]*>/g, '\n')
-        .replace(/&amp;/g, '&')
-        .replace(/&#8211;/g, '-')
-        .replace(/&#8217;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/\n+/g, '\n')
-        .trim();
 }
