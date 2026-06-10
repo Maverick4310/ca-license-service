@@ -1,61 +1,78 @@
-import axios from 'axios';
-
-const DFPI_SEARCH_URL = 'https://dfpi.ca.gov/';
-
-export async function searchDFPI(companyName) { 
+export async function searchDFPI(companyName) {
     if (!companyName) {
         return [];
     }
 
-    const searchUrl =
-        `${DFPI_SEARCH_URL}?s=${encodeURIComponent(companyName)}`;
-
-    const response = await axios.get(searchUrl, {
-        timeout: 15000,
-        headers: {
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'text/html'
-        }
-    });
-
-    const html = response.data || '';
-
-    const blocks = extractSearchBlocks(html);
-
-    return blocks
-        .map(parseDfpiBlock)
-        .filter(row => row.entityName)
-        .slice(0, 25);
-}
-
-function extractSearchBlocks(html) {
-    const blocks = [];
-
-    const articleRegex = /<article[\s\S]*?<\/article>/gi;
-    const matches = html.match(articleRegex) || [];
-
-    for (const match of matches) {
-        const text = stripHtml(match);
-
-        if (text.length > 30) {
-            blocks.push(text);
-        }
+    if (!process.env.SERPAPI_KEY) {
+        throw new Error('SERPAPI_KEY is not configured.');
     }
 
-    return blocks;
+    const query = `site:dfpi.ca.gov "${companyName}"`;
+
+    const url =
+        `https://serpapi.com/search.json?engine=google` +
+        `&q=${encodeURIComponent(query)}` +
+        `&api_key=${process.env.SERPAPI_KEY}`;
+
+    const response = await fetch(url, {
+        signal: AbortSignal.timeout(15000)
+    });
+
+    if (!response.ok) {
+        throw new Error(`SerpAPI failed with status ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    return (data.organic_results || []).map(result => {
+        const text = `${result.title || ''} ${result.snippet || ''}`;
+
+        return {
+            entityName: cleanTitle(result.title),
+            licenseNumber: extractLicenseNumber(text),
+            licenseType: extractLicenseType(text),
+            licenseStatus: extractStatus(text),
+            address: '',
+            source: result.link || 'SerpAPI / DFPI',
+            rawJson: JSON.stringify(result)
+        };
+    });
 }
 
-function parseDfpiBlock(text) {
-    const lines = text
-        .split('\n')
-        .map(x => x.trim())
-        .filter(Boolean);
+function cleanTitle(title) {
+    if (!title) return '';
 
-    const licenseMatch =
+    return title
+        .replace(' - DFPI - CA.gov', '')
+        .replace(' - DFPI', '')
+        .trim();
+}
+
+function extractLicenseNumber(text) {
+    const match =
         text.match(/60DBO[-\s]?\d+/i) ||
-        text.match(/License\s*(No\.?|Number)?\s*[:#]?\s*([A-Z0-9-]+)/i);
+        text.match(/603[A-Z0-9]+/i) ||
+        text.match(/CFL\s*#?\s*60DBO[-\s]?\d+/i);
 
-    const statusMatch =
+    return match ? match[0].replace(/^CFL\s*#?\s*/i, '') : '';
+}
+
+function extractLicenseType(text) {
+    const lower = text.toLowerCase();
+
+    if (
+        lower.includes('california finance lender') ||
+        lower.includes('california financing law') ||
+        lower.includes('cfl')
+    ) {
+        return 'California Finance Lender and Broker';
+    }
+
+    return 'DFPI Search Result';
+}
+
+function extractStatus(text) {
+    const match =
         text.match(/\bActive\b/i) ||
         text.match(/\bInactive\b/i) ||
         text.match(/\bRevoked\b/i) ||
@@ -63,29 +80,5 @@ function parseDfpiBlock(text) {
         text.match(/\bSuspended\b/i) ||
         text.match(/\bExpired\b/i);
 
-    return {
-        entityName: lines[0] || '',
-        licenseNumber: licenseMatch ? licenseMatch[0] : '',
-        licenseType: text.toLowerCase().includes('california financing')
-            ? 'California Financing Law'
-            : 'DFPI Search Result',
-        licenseStatus: statusMatch ? statusMatch[0] : '',
-        address: lines.slice(1, 4).join(', '),
-        source: 'DFPI',
-        rawJson: JSON.stringify({ text })
-    };
-}
-
-function stripHtml(html) {
-    return html
-        .replace(/<script[\s\S]*?<\/script>/gi, '')
-        .replace(/<style[\s\S]*?<\/style>/gi, '')
-        .replace(/<[^>]*>/g, '\n')
-        .replace(/&amp;/g, '&')
-        .replace(/&#8211;/g, '-')
-        .replace(/&#8217;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/\n+/g, '\n')
-        .trim();
+    return match ? match[0] : '';
 }
