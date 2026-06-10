@@ -1,75 +1,166 @@
-export async function searchDFPI(companyName) {
+/**
+ * DFPI Regulated Entities lookup.
+ *
+ * The DFPI "Regulated Entities List" page (dfpi.ca.gov/regulated-industries/
+ * regulated-entities-list/) is a SearchStax Site Search front end. The license
+ * records you see on that page are NOT served by Google -- they come from a
+ * Solr `/emselect` endpoint that the page calls in the browser.
+ *
+ * SERP API (Google scraping) can only ever return DFPI's static, indexed pages
+ * (press releases, enforcement actions, the site map), which is why the old
+ * implementation returned news instead of license records. This module talks to
+ * the real `/emselect` endpoint instead.
+ *
+ * Required configuration (read these straight out of your browser DevTools:
+ * Network tab -> the `emselect?q=...` request -> Headers):
+ *
+ *   DFPI_SEARCH_URL    Full select endpoint, e.g.
+ *                      https://searchcloud-2-us-east-1.searchstax.com/<acct>/<app>/emselect
+ *                      (Request URL of the emselect call, minus the query string)
+ *   DFPI_SEARCH_TOKEN  Read-only token from the request's
+ *                      `Authorization: Token <value>` header (value only)
+ *
+ * Optional:
+ *   DFPI_SEARCH_ROWS   How many rows to request (default 25)
+ */
+
+const SOURCE_BASE =
+    'https://dfpi.ca.gov/regulated-industries/regulated-entities-list/';
+
+export async function searchDFPI(companyName, options = {}) {
     if (!companyName) {
         return [];
     }
 
-    if (!process.env.SERPAPI_KEY) {
-        throw new Error('SERPAPI_KEY is not configured.');
+    const endpoint = options.endpoint || process.env.DFPI_SEARCH_URL;
+    const token = options.token || process.env.DFPI_SEARCH_TOKEN;
+
+    if (!endpoint) {
+        throw new Error(
+            'DFPI_SEARCH_URL is not configured. Copy the full /emselect ' +
+            'Request URL from DevTools (Network tab) without its query string.'
+        );
     }
 
-    const query = `site:dfpi.ca.gov "${companyName}"`;
+    const rows = Number(options.rows || process.env.DFPI_SEARCH_ROWS || 25);
 
-    const url =
-        `https://serpapi.com/search.json?engine=google` +
-        `&q=${encodeURIComponent(query)}` +
-        `&api_key=${process.env.SERPAPI_KEY}`;
+    // Mirror the params the DFPI page sends, scoped to regulated entities only.
+    const params = new URLSearchParams({
+        q: companyName,
+        fq: 'ss_content_type_s:"Regulated Entity"',
+        defType: 'edismax',
+        // Match the name across the same fields the site weights most heavily.
+        qf: 'title_t^77.0 dba_names_t dba_names_s custom_xpath_t content_t',
+        qs: '2',
+        fl: 'id,title_t,sorttitle_sortable,ss_content_type_s,custom_xpath_t,uri,Registration_Types_s,License_Status_Reason_s',
+        rows: String(rows),
+        start: String(options.start || 0),
+        language: 'en',
+        wt: 'json'
+    });
+
+    const url = `${endpoint}?${params.toString()}`;
+
+    const headers = { Accept: 'application/json' };
+    if (token) {
+        headers.Authorization = `Token ${token}`;
+    }
 
     const response = await fetch(url, {
+        headers,
         signal: AbortSignal.timeout(15000)
     });
 
     if (!response.ok) {
-        throw new Error(`SerpAPI failed with status ${response.status}`);
+        const hint =
+            response.status === 401 || response.status === 403
+                ? ' (check DFPI_SEARCH_TOKEN -- the read-only token from the ' +
+                  'Authorization header)'
+                : '';
+        throw new Error(
+            `DFPI /emselect failed with status ${response.status}${hint}`
+        );
     }
 
     const data = await response.json();
+    const docs = (data && data.response && data.response.docs) || [];
 
-    return (data.organic_results || [])
-        .map(result => {
-            const text = `${result.title || ''} ${result.snippet || ''}`;
-            const source = result.link || 'SerpAPI / DFPI';
-
-            return {
-                entityName: extractEntityName(result, companyName),
-                licenseNumber: extractLicenseNumber(text),
-                licenseType: extractLicenseType(text),
-                licenseStatus: extractStatus(text),
-                address: extractAddress(text),
-                source,
-                rawJson: JSON.stringify(result)
-            };
-        })
-        .filter(row => {
-            return row.entityName || row.licenseNumber || row.source;
-        })
-        .slice(0, 25);
+    return docs
+        .map(toLicenseRecord)
+        .filter(row => row.entityName || row.licenseNumber);
 }
 
-function extractEntityName(result, fallbackName) {
-    const title = cleanTitle(result.title || '');
+function toLicenseRecord(doc) {
+    const fields = parseCustomXpath(doc.custom_xpath_t || '');
 
-    if (
-        title &&
-        !title.toLowerCase().includes('dfpi') &&
-        !title.toLowerCase().includes('news') &&
-        !title.toLowerCase().includes('consumers') &&
-        !title.toLowerCase().includes('site map') &&
-        !title.toLowerCase().includes('press releases')
-    ) {
-        return title;
-    }
+    const entityName =
+        fields['Legal Name Organization'] ||
+        cleanTitle(doc.title_t || '');
 
-    const snippet = result.snippet || '';
+    const address = [
+        fields['Address1'],
+        fields['Address2'],
+        fields['City'],
+        fields['State'],
+        fields['Zip']
+    ]
+        .filter(Boolean)
+        .join(', ');
 
-    const legalMatch =
-        snippet.match(/Legal Name Organization:\s*([^\.]+?)(?=Organization DBA:|Originally Licensed On:|License Type:|Address1:|$)/i) ||
-        snippet.match(/Party\.\s*([^\.]+?)(?=Documents|Date|$)/i);
+    const uri = doc.uri || '';
+    const source = uri
+        ? SOURCE_BASE + uri.replace(/^\//, '')
+        : SOURCE_BASE;
 
-    if (legalMatch) {
-        return legalMatch[1].trim();
-    }
+    return {
+        entityName,
+        licenseNumber: fields['License Number'] || '',
+        licenseType: fields['License Type'] || '',
+        licenseStatus: fields['Status'] || '',
+        address,
+        // Extra structured fields (passed through by the scorer untouched).
+        dba: stripNulls(fields['Organization DBA'] || ''),
+        effectiveStatusDate: fields['Effective Status Date'] || '',
+        originallyLicensedOn: fields['Originally Licensed On'] || '',
+        registrationType:
+            fields['Registration Type'] ||
+            (doc.Registration_Types_s || ''),
+        licenseStatusReason:
+            fields['License Status Reason'] ||
+            (doc.License_Status_Reason_s || ''),
+        enforcementCase: fields['Enforcement Case'] || '',
+        source,
+        rawJson: JSON.stringify(doc)
+    };
+}
 
-    return fallbackName;
+/**
+ * custom_xpath_t is a newline-delimited "Key: Value" block. Parse it into a map,
+ * splitting only on the first colon so values containing colons survive.
+ */
+function parseCustomXpath(text) {
+    const out = {};
+
+    String(text)
+        .split('\n')
+        .forEach(line => {
+            const idx = line.indexOf(':');
+            if (idx === -1) {
+                return;
+            }
+            const key = line.slice(0, idx).trim();
+            const value = stripNulls(line.slice(idx + 1).trim());
+            if (key) {
+                out[key] = value;
+            }
+        });
+
+    return out;
+}
+
+function stripNulls(value) {
+    // The feed uses a literal NULL char (\u0000) for empty DBA values.
+    return value.replace(/\u0000/g, '').trim();
 }
 
 function cleanTitle(title) {
@@ -78,74 +169,4 @@ function cleanTitle(title) {
         .replace(' - DFPI', '')
         .replace(' - CA.gov', '')
         .trim();
-}
-
-function extractLicenseNumber(text) {
-    const match =
-        text.match(/License Number:\s*([A-Z0-9-]+)/i) ||
-        text.match(/License or Case Number\s*CFL\s*#?\s*([A-Z0-9-]+)/i) ||
-        text.match(/CFL\s*#?\s*(60DBO[-\s]?\d+)/i) ||
-        text.match(/60DBO[-\s]?\d+/i) ||
-        text.match(/603[A-Z0-9]+/i);
-
-    if (!match) {
-        return '';
-    }
-
-    return (match[1] || match[0])
-        .replace(/^License Number:\s*/i, '')
-        .replace(/^License or Case Number\s*/i, '')
-        .replace(/^CFL\s*#?\s*/i, '')
-        .trim();
-}
-
-function extractLicenseType(text) {
-    const match = text.match(/License Type:\s*([^\.]+?)(?=Address1:|Address2:|City:|State:|Zip:|$)/i);
-
-    if (match) {
-        return match[1].trim();
-    }
-
-    const lower = text.toLowerCase();
-
-    if (
-        lower.includes('california finance lender') ||
-        lower.includes('california financing law') ||
-        lower.includes('finance lender and broker') ||
-        lower.includes('cfl')
-    ) {
-        return 'California Finance Lender and Broker';
-    }
-
-    return 'DFPI Search Result';
-}
-
-function extractStatus(text) {
-    const match =
-        text.match(/Status:\s*([A-Za-z]+)/i) ||
-        text.match(/\bActive\b/i) ||
-        text.match(/\bInactive\b/i) ||
-        text.match(/\bRevoked\b/i) ||
-        text.match(/\bSurrendered\b/i) ||
-        text.match(/\bSuspended\b/i) ||
-        text.match(/\bExpired\b/i);
-
-    return match ? (match[1] || match[0]).trim() : '';
-}
-
-function extractAddress(text) {
-    const address1 = extractValue(text, /Address1:\s*([^\.]+?)(?=Address2:|City:|State:|Zip:|$)/i);
-    const address2 = extractValue(text, /Address2:\s*([^\.]+?)(?=City:|State:|Zip:|$)/i);
-    const city = extractValue(text, /City:\s*([^\.]+?)(?=State:|Zip:|$)/i);
-    const state = extractValue(text, /State:\s*([^\.]+?)(?=Zip:|$)/i);
-    const zip = extractValue(text, /Zip:\s*([0-9\-]+)/i);
-
-    return [address1, address2, city, state, zip]
-        .filter(Boolean)
-        .join(', ');
-}
-
-function extractValue(text, regex) {
-    const match = text.match(regex);
-    return match ? match[1].trim() : '';
 }
