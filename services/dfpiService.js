@@ -24,19 +24,30 @@ export async function searchDFPI(companyName) {
 
     const data = await response.json();
 
-    return (data.organic_results || []).map(result => {
-        const text = `${result.title || ''} ${result.snippet || ''}`;
+    return (data.organic_results || [])
+        .map(result => {
+            const text = `${result.title || ''} ${result.snippet || ''}`;
+            const source = result.link || 'SerpAPI / DFPI';
 
-        return {
-            entityName: cleanTitle(result.title),
-            licenseNumber: extractLicenseNumber(text),
-            licenseType: extractLicenseType(text),
-            licenseStatus: extractStatus(text),
-            address: '',
-            source: result.link || 'SerpAPI / DFPI',
-            rawJson: JSON.stringify(result)
-        };
-    });
+            return {
+                entityName: cleanTitle(result.title),
+                licenseNumber: extractLicenseNumber(text),
+                licenseType: extractLicenseType(text),
+                licenseStatus: extractStatus(text),
+                address: '',
+                source,
+                rawJson: JSON.stringify(result)
+            };
+        })
+        .filter(row => {
+            const url = (row.source || '').toLowerCase();
+
+            return (
+                url.includes('/enforcement_action/') ||
+                url.includes('/regulated-industries/regulated-entities-list/')
+            );
+        })
+        .slice(0, 25);
 }
 
 function cleanTitle(title) {
