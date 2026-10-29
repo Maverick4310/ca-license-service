@@ -45,6 +45,18 @@ router.post(
 
             console.error(e);
 
+            // DFPI busy or down: tell Salesforce so it can show a friendly
+            // message instead of a raw failure.
+            const upstream = e.upstreamStatus;
+            const timedOut = e.name === 'TimeoutError' || e.name === 'AbortError';
+            if (upstream === 429 || (upstream >= 500) || timedOut) {
+                return res.status(503).json({
+                    success: false,
+                    code: upstream === 429 ? 'DFPI_BUSY' : 'DFPI_UNAVAILABLE',
+                    message: e.message
+                });
+            }
+
             res.status(500).json({
                 success: false,
                 message: e.message

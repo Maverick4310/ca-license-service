@@ -86,10 +86,7 @@ export async function searchDFPI(companyName, options = {}) {
         headers.Authorization = `Token ${token}`;
     }
 
-    const response = await fetch(url, {
-        headers,
-        signal: AbortSignal.timeout(15000)
-    });
+    const response = await fetchWithRetry(url, headers);
 
     if (!response.ok) {
         const hint =
@@ -99,9 +96,11 @@ export async function searchDFPI(companyName, options = {}) {
                   'otherwise the endpoint is gating on Origin/Referer, which ' +
                   'this client already sends)'
                 : '';
-        throw new Error(
+        const err = new Error(
             `DFPI /emselect failed with status ${response.status}${hint}`
         );
+        err.upstreamStatus = response.status;
+        throw err;
     }
 
     const data = await response.json();
@@ -110,6 +109,44 @@ export async function searchDFPI(companyName, options = {}) {
     return docs
         .map(toLicenseRecord)
         .filter(row => row.entityName || row.licenseNumber);
+}
+
+// DFPI's search answers 429 when it is rate limiting. Retry a couple of times
+// (honouring Retry-After when it is short) and log what DFPI sent back, so we
+// can tell a key quota from IP throttling.
+const RETRY_DELAYS_MS = [1500, 4000];
+
+async function fetchWithRetry(url, headers) {
+    for (let attempt = 0; ; attempt++) {
+        const response = await fetch(url, {
+            headers,
+            signal: AbortSignal.timeout(15000)
+        });
+        if (response.ok) {
+            return response;
+        }
+
+        const retryAfter = response.headers.get('retry-after');
+        const body = await response.text().catch(() => '');
+        const rateHeaders = [...response.headers.entries()]
+            .filter(([k]) => /rate|limit|retry|cf-ray|server/i.test(k))
+            .map(([k, v]) => `${k}=${v}`)
+            .join('; ');
+        console.error(
+            `DFPI /emselect ${response.status} (attempt ${attempt + 1}) ` +
+            `headers: ${rateHeaders || 'none'} body: ${body.slice(0, 300)}`
+        );
+
+        const retryable = response.status === 429 || response.status >= 500;
+        if (!retryable || attempt >= RETRY_DELAYS_MS.length) {
+            return { ok: false, status: response.status };
+        }
+        const waitSec = Number(retryAfter);
+        const delay = Number.isFinite(waitSec) && waitSec > 0 && waitSec <= 5
+            ? waitSec * 1000
+            : RETRY_DELAYS_MS[attempt];
+        await new Promise(resolve => setTimeout(resolve, delay));
+    }
 }
 
 function toLicenseRecord(doc) {
